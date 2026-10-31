@@ -15,6 +15,56 @@ pub fn socket_path() -> std::path::PathBuf {
     std::path::PathBuf::from(dir).join("cosmic-ext-app-switcher.sock")
 }
 
+pub fn lock_path() -> std::path::PathBuf {
+    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
+    std::path::PathBuf::from(dir).join("cosmic-ext-app-switcher.lock")
+}
+
+pub struct InstanceLock {
+    file: std::fs::File,
+    path: std::path::PathBuf,
+}
+
+impl InstanceLock {
+    pub fn try_acquire(path: std::path::PathBuf) -> Result<Self, std::io::Error> {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::io::AsRawFd;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)?;
+
+        let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        Ok(InstanceLock { file, path })
+    }
+}
+
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+pub struct SocketCleaner(pub std::path::PathBuf);
+
+impl Drop for SocketCleaner {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "cosmic-ext-app-switcher", version)]
 pub struct Args {
@@ -69,15 +119,81 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // We are the first instance. Clean up any stale socket from a crash.
+    // Ensure only one instance runs at a time.
+    let _instance_lock = match InstanceLock::try_acquire(lock_path()) {
+        Ok(lock) => lock,
+        Err(_) => {
+            // Another instance holds the lock. Retry connecting to its socket in case
+            // it was still binding when we checked above.
+            for _ in 0..10 {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                if let Ok(mut s) = UnixStream::connect(socket_path()) {
+                    let _ = s.write_all(cmd);
+                    return Ok(());
+                }
+            }
+            log::warn!("another instance of cosmic-ext-app-switcher is already live; exiting");
+            return Ok(());
+        }
+    };
+
+    // We are the only instance. Clean up any stale socket from a crash, then
+    // immediately bind the listener so subsequent rapid invocations can connect
+    // and queue without spawning duplicate switcher instances.
     let _ = std::fs::remove_file(socket_path());
+    let _cleaner = SocketCleaner(socket_path());
+    let listener = match std::os::unix::net::UnixListener::bind(socket_path()) {
+        Ok(l) => {
+            let _ = l.set_nonblocking(true);
+            Some(l)
+        }
+        Err(e) => {
+            log::warn!("could not pre-bind socket at {:?}: {e}", socket_path());
+            None
+        }
+    };
 
     let theme = load_theme();
     let scope = load_scope();
-    let (toplevels, cmd_tx) = wayland::spawn_wayland_thread(scope)?;
+    let (toplevels, cmd_tx, join_handle) = wayland::spawn_wayland_thread(scope)?;
     if toplevels.is_empty() {
+        drop(cmd_tx);
+        let _ = join_handle.join();
         return Ok(());
     }
 
-    app::run(toplevels, args.reverse, cmd_tx, theme)
+    let run_res = app::run(toplevels, args.reverse, cmd_tx, theme, listener);
+    let _ = join_handle.join();
+    run_res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn second_instance_lock_fails_while_first_is_held() {
+        let temp = std::env::temp_dir().join(format!("instance-lock-test-{}", std::process::id()));
+        let lock1 = InstanceLock::try_acquire(temp.clone()).expect("first lock should succeed");
+
+        let lock2 = InstanceLock::try_acquire(temp.clone());
+        assert!(lock2.is_err(), "second lock acquisition should fail while first is held");
+
+        drop(lock1);
+        let lock3 = InstanceLock::try_acquire(temp.clone());
+        assert!(lock3.is_ok(), "lock acquisition should succeed after previous is dropped");
+    }
+
+    #[test]
+    fn socket_cleaner_removes_file_on_drop() {
+        let temp = std::env::temp_dir().join(format!("socket-cleaner-test-{}", std::process::id()));
+        std::fs::write(&temp, b"test").unwrap();
+        assert!(temp.exists());
+
+        {
+            let _cleaner = SocketCleaner(temp.clone());
+        }
+
+        assert!(!temp.exists(), "SocketCleaner should remove file on drop");
+    }
 }

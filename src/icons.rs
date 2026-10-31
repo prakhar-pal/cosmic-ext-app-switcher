@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 const FALLBACK_ICON: &str = "application-x-executable";
 
 /// What to draw for one window.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppIcon {
     /// A name to look up in the icon theme. Always one that resolved.
     Named(String),
@@ -18,6 +19,7 @@ pub enum AppIcon {
 }
 
 /// How one window is presented in the strip.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppVisual {
     pub icon: AppIcon,
     /// What to print under the strip when this window is selected.
@@ -51,8 +53,15 @@ pub fn visual_for(app_id: &str, window_title: &str, size: u16) -> AppVisual {
         // An absolute Icon= that doesn't exist still names the icon by its stem, which is
         // how Steam's entries point at icons it installed into the theme.
         Some(field) => resolve(&icon_name_from_field(&field), size),
-        // No entry found: reverse-DNS app_ids often end in their own icon name.
-        None => resolve(app_id.split('.').next_back().unwrap_or(app_id), size),
+        // No entry found: try app_id directly first, then reverse-DNS leaf.
+        None => {
+            let direct = resolve(app_id, size);
+            if direct != AppIcon::Named(FALLBACK_ICON.to_string()) {
+                direct
+            } else {
+                resolve(app_id.split('.').next_back().unwrap_or(app_id), size)
+            }
+        }
     };
 
     AppVisual { icon, label }
@@ -158,32 +167,78 @@ fn search_dirs() -> Vec<PathBuf> {
     xdg.chain(extra).filter(|d| seen.insert(d.clone())).collect()
 }
 
-// If the Icon= field in a .desktop file is an absolute path, extract the stem
-// (e.g. "/path/to/steam_icon_480.png" -> "steam_icon_480") so that from_name()
-// can resolve it through the XDG icon theme where Steam has already installed it.
+// If the Icon= field in a .desktop file is an absolute path or has a known image file extension
+// (e.g. "/path/to/steam_icon_480.png" -> "steam_icon_480", "app.png" -> "app"),
+// extract the stem so that from_name() can resolve it through the XDG icon theme.
+// For reverse-DNS names like "com.system76.CosmicTerm", preserve the full name rather than
+// treating the last domain component as a file extension.
 fn icon_name_from_field(icon: &str) -> String {
-    if icon.starts_with('/') {
-        Path::new(icon)
-            .file_stem()
+    let path = Path::new(icon);
+    // If it has a known icon file extension (.png, .svg, .xpm, .ico), strip it.
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        let ext_lower = ext.to_ascii_lowercase();
+        if matches!(ext_lower.as_str(), "png" | "svg" | "xpm" | "ico") {
+            return path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or(icon)
+                .to_string();
+        }
+    }
+    // If it is a path containing directory components (e.g. "/usr/share/pixmaps/foo"),
+    // extract the filename.
+    if path.parent().is_some_and(|p| !p.as_os_str().is_empty()) {
+        return path
+            .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(icon)
-            .to_string()
-    } else {
-        icon.to_string()
+            .to_string();
     }
+    icon.to_string()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AppIcon, FALLBACK_ICON, icon_name_from_field, search_dirs, stem_matches, visual_for,
-    };
+    use super::*;
     use std::path::PathBuf;
 
     #[test]
-    fn absolute_icon_fields_become_stems() {
+    fn cosmic_apps_resolve_their_icons() {
+        for (app_id, title, expected_icon) in [
+            ("com.system76.CosmicTerm", "COSMIC Terminal", "com.system76.CosmicTerm"),
+            ("com.system76.CosmicFiles", "COSMIC Files", "com.system76.CosmicFiles"),
+            ("com.system76.CosmicEdit", "COSMIC Text Editor", "com.system76.CosmicEdit"),
+        ] {
+            let visual = visual_for(app_id, title, 60);
+            assert_eq!(
+                visual.icon,
+                AppIcon::Named(expected_icon.to_string()),
+                "Failed resolving icon for {app_id}"
+            );
+            assert_eq!(visual.label, title);
+        }
+    }
+
+    #[test]
+    fn app_visual_can_be_cached_and_compared() {
+        let visual1 = visual_for("firefox", "Mozilla Firefox", 48);
+        let visual2 = visual1.clone();
+        assert_eq!(visual1, visual2);
+    }
+
+    #[test]
+    fn absolute_and_relative_icon_fields_become_stems() {
         assert_eq!(icon_name_from_field("/a/b/steam_icon_480.png"), "steam_icon_480");
         assert_eq!(icon_name_from_field("firefox"), "firefox");
+        assert_eq!(icon_name_from_field("firefox.png"), "firefox");
+        assert_eq!(icon_name_from_field("app.svg"), "app");
+        assert_eq!(icon_name_from_field("app.xpm"), "app");
+        assert_eq!(icon_name_from_field("app.ico"), "app");
+        assert_eq!(icon_name_from_field("/usr/share/pixmaps/custom_app"), "custom_app");
+        assert_eq!(icon_name_from_field("/opt/apps/com.example.App.svg"), "com.example.App");
+        assert_eq!(icon_name_from_field("com.system76.CosmicTerm"), "com.system76.CosmicTerm");
+        assert_eq!(icon_name_from_field("org.gnome.Nautilus"), "org.gnome.Nautilus");
+        assert_eq!(icon_name_from_field("com.system76.CosmicTerm.svg"), "com.system76.CosmicTerm");
     }
 
     #[test]
@@ -208,6 +263,10 @@ mod tests {
             format!("[Desktop Entry]\nType=Application\nName=Thing\nIcon={}\n", icon.display()),
         )
         .unwrap();
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg_data_home = std::env::var_os("XDG_DATA_HOME");
+        let prev_xdg_data_dirs = std::env::var_os("XDG_DATA_DIRS");
 
         // SAFETY: no other test reads or writes these variables.
         unsafe {
@@ -255,6 +314,21 @@ mod tests {
 
         // With nothing else to go on, the app_id is still better than a blank line.
         assert_eq!(visual_for("no-such-app-6f3b", "", 48).label, "no-such-app-6f3b");
+
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_xdg_data_home {
+                Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                None => std::env::remove_var("XDG_DATA_HOME"),
+            }
+            match prev_xdg_data_dirs {
+                Some(v) => std::env::set_var("XDG_DATA_DIRS", v),
+                None => std::env::remove_var("XDG_DATA_DIRS"),
+            }
+        }
 
         std::fs::remove_dir_all(&root).ok();
     }

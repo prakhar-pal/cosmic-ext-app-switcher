@@ -165,7 +165,7 @@ else
         CONFIG="${VERSION_DIR:-$SHORTCUTS_DIR/v1}/system_actions"
     fi
 
-    if [ -f "$CONFIG" ] && grep -q "cosmic-ext-app-switcher" "$CONFIG"; then
+    if [ -f "$CONFIG" ] && grep -qE "^\s*WindowSwitcher:\s*\"$INSTALL_DIR/$BINARY\"" "$CONFIG" 2>/dev/null; then
         echo "Shortcut already registered."
     else
         # Rebuild the RON map rather than patching it: a file left without its braces
