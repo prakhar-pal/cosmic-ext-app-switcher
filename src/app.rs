@@ -18,7 +18,7 @@ use cosmic::{
 use crate::wayland::{ActivateCommand, ToplevelEntry};
 use switcher_config::{Theme, ThemeValues};
 
-pub const INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+pub const INACTIVITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[derive(Clone)]
 pub struct SharedListener(pub std::sync::Arc<std::sync::Mutex<Option<std::os::unix::net::UnixListener>>>);
@@ -44,6 +44,9 @@ pub struct AppSwitcher {
     cmd_tx:            mpsc::SyncSender<ActivateCommand>,
     super_held:        bool,
     alt_held:          bool,
+    modifiers: keyboard::Modifiers,
+    initial_shortcut: bool,
+    pending_activation: Option<std::time::Instant>,
     surface_id:        WindowId,
     pub theme:         ThemeValues,
     pub visuals:       Vec<crate::icons::AppVisual>,
@@ -67,6 +70,7 @@ impl Application for AppSwitcher {
     type Flags    = (
         Vec<ToplevelEntry>,
         bool,
+        bool,
         mpsc::SyncSender<ActivateCommand>,
         Theme,
         Option<std::os::unix::net::UnixListener>,
@@ -79,7 +83,7 @@ impl Application for AppSwitcher {
     fn core_mut(&mut self) -> &mut Core { &mut self.core }
 
     fn init(core: Core, flags: Self::Flags) -> (Self, Task<Message>) {
-        let (toplevels, reverse, cmd_tx, theme_preset, listener_opt) = flags;
+        let (toplevels, reverse, shortcut, cmd_tx, theme_preset, listener_opt) = flags;
         let n = toplevels.len();
         let selected = if reverse {
             n.saturating_sub(1)
@@ -112,6 +116,9 @@ impl Application for AppSwitcher {
                 cmd_tx,
                 super_held: false,
                 alt_held: false,
+                modifiers: keyboard::Modifiers::empty(),
+                initial_shortcut: shortcut,
+                pending_activation: None,
                 surface_id,
                 theme,
                 visuals,
@@ -127,10 +134,12 @@ impl Application for AppSwitcher {
         match msg {
             Message::SelectNext => {
                 self.last_activity = std::time::Instant::now();
+                if self.pending_activation.is_some() { self.pending_activation = Some(self.last_activity + std::time::Duration::from_millis(100)); }
                 self.selected = (self.selected + 1) % n;
             }
             Message::SelectPrev => {
                 self.last_activity = std::time::Instant::now();
+                if self.pending_activation.is_some() { self.pending_activation = Some(self.last_activity + std::time::Duration::from_millis(100)); }
                 self.selected = (self.selected + n - 1) % n;
             }
             Message::SelectIndex(i) => {
@@ -138,7 +147,11 @@ impl Application for AppSwitcher {
                 self.selected = i;
             }
             Message::Tick(now) => {
-                if now.duration_since(self.last_activity) >= INACTIVITY_TIMEOUT {
+                if self.pending_activation.is_some_and(|deadline| now >= deadline) {
+                    self.pending_activation = None;
+                    return self.update(Message::Activate);
+                }
+                if !self.initial_shortcut && self.modifiers.is_empty() && now.duration_since(self.last_activity) >= INACTIVITY_TIMEOUT {
                     log::info!("Inactivity timeout expired; activating selected window");
                     return self.update(Message::Activate);
                 }
@@ -163,6 +176,7 @@ impl Application for AppSwitcher {
                 self.last_activity = std::time::Instant::now();
                 match ke {
                 keyboard::Event::KeyPressed { key, modifiers, .. } => {
+                    self.modifiers = modifiers;
                     if modifiers.logo() {
                         self.super_held = true;
                     }
@@ -187,6 +201,12 @@ impl Application for AppSwitcher {
                     }
                 }
                 keyboard::Event::ModifiersChanged(mods) => {
+                    self.modifiers = mods;
+                    if mods.alt() || mods.logo() { self.pending_activation = None; }
+                    let first = std::mem::take(&mut self.initial_shortcut);
+                    if first && !mods.alt() && !mods.logo() {
+                        self.pending_activation = Some(std::time::Instant::now() + std::time::Duration::from_millis(100));
+                    }
                     let activate = (self.super_held && !mods.logo())
                         || (self.alt_held && !mods.alt());
                     self.super_held = mods.logo();
@@ -251,7 +271,7 @@ impl Application for AppSwitcher {
             })
         };
 
-        let timer_sub = cosmic::iced::time::every(std::time::Duration::from_millis(200)).map(Message::Tick);
+        let timer_sub = cosmic::iced::time::every(std::time::Duration::from_millis(20)).map(Message::Tick);
 
         Subscription::batch([key_sub, socket_sub, timer_sub])
     }
@@ -268,12 +288,13 @@ impl Application for AppSwitcher {
 pub fn run(
     toplevels: Vec<ToplevelEntry>,
     reverse: bool,
+    shortcut: bool,
     cmd_tx: mpsc::SyncSender<ActivateCommand>,
     theme: Theme,
     listener: Option<std::os::unix::net::UnixListener>,
 ) -> Result<()> {
     let settings = Settings::default().no_main_window(true);
-    cosmic::app::run::<AppSwitcher>(settings, (toplevels, reverse, cmd_tx, theme, listener))
+    cosmic::app::run::<AppSwitcher>(settings, (toplevels, reverse, shortcut, cmd_tx, theme, listener))
         .map_err(|e| anyhow::anyhow!("{e:?}"))
 }
 
@@ -281,6 +302,89 @@ pub fn run(
 mod tests {
     use super::*;
     use cosmic::iced::keyboard::{self, key::Named, Modifiers};
+
+    fn switcher_for_test(shortcut: bool, selected: usize) -> (AppSwitcher, mpsc::Receiver<ActivateCommand>) {
+        let (cmd_tx, cmd_rx) = mpsc::sync_channel(4);
+        let toplevels = (0..3).map(|i| ToplevelEntry {
+            app_id: i.to_string(), title: i.to_string(), is_active: i == 0, handle_key: i,
+        }).collect();
+        (AppSwitcher {
+            core: Core::default(), toplevels, selected, cmd_tx,
+            super_held: false, alt_held: false, modifiers: Modifiers::empty(),
+            initial_shortcut: shortcut, pending_activation: None, surface_id: WindowId::unique(),
+            theme: Theme::Dark.values(), visuals: vec![],
+            listener: SharedListener(std::sync::Arc::new(std::sync::Mutex::new(None))),
+            last_activity: std::time::Instant::now(),
+        }, cmd_rx)
+    }
+
+    #[test]
+    fn quick_shortcut_activates_initial_next_or_previous_selection() {
+        for selected in [1, 2] {
+            let (mut app, rx) = switcher_for_test(true, selected);
+            let _ = app.update(Message::KeyEvent(keyboard::Event::ModifiersChanged(Modifiers::empty())));
+            assert!(rx.try_recv().is_err());
+            let _ = app.update(Message::Tick(std::time::Instant::now() + std::time::Duration::from_millis(100)));
+            assert!(matches!(rx.try_recv(), Ok(ActivateCommand::Activate(i)) if i == selected));
+        }
+    }
+
+    #[test]
+    fn cycling_restarts_pending_activation_and_uses_latest_selection() {
+        let (mut app, rx) = switcher_for_test(true, 1);
+        let _ = app.update(Message::KeyEvent(keyboard::Event::ModifiersChanged(Modifiers::empty())));
+        let old_deadline = app.pending_activation.unwrap();
+        let _ = app.update(Message::SelectNext);
+        let new_deadline = app.pending_activation.unwrap();
+        assert!(new_deadline >= old_deadline);
+        let _ = app.update(Message::Tick(new_deadline));
+        assert!(matches!(rx.try_recv(), Ok(ActivateCommand::Activate(2))));
+    }
+
+    #[test]
+    fn modifier_press_cancels_pending_activation_until_release() {
+        let (mut app, rx) = switcher_for_test(true, 1);
+        let _ = app.update(Message::KeyEvent(keyboard::Event::ModifiersChanged(Modifiers::empty())));
+        let deadline = app.pending_activation.unwrap();
+        let _ = app.update(Message::KeyEvent(keyboard::Event::ModifiersChanged(Modifiers::ALT)));
+        let _ = app.update(Message::Tick(deadline));
+        assert!(rx.try_recv().is_err());
+        let _ = app.update(Message::KeyEvent(keyboard::Event::ModifiersChanged(Modifiers::empty())));
+        assert!(matches!(rx.try_recv(), Ok(ActivateCommand::Activate(1))));
+    }
+
+    #[test]
+    fn initial_held_modifier_waits_for_release_and_prevents_timeout() {
+        for modifier in [Modifiers::ALT, Modifiers::LOGO] {
+            let (mut app, rx) = switcher_for_test(true, 1);
+            let _ = app.update(Message::KeyEvent(keyboard::Event::ModifiersChanged(modifier)));
+            let _ = app.update(Message::Tick(app.last_activity + INACTIVITY_TIMEOUT + std::time::Duration::from_secs(1)));
+            assert!(rx.try_recv().is_err());
+            let _ = app.update(Message::SelectNext);
+            let _ = app.update(Message::KeyEvent(keyboard::Event::ModifiersChanged(Modifiers::empty())));
+            assert!(matches!(rx.try_recv(), Ok(ActivateCommand::Activate(2))));
+        }
+    }
+
+    #[test]
+    fn direct_launch_waits_and_all_modifiers_block_timeout() {
+        let (mut app, rx) = switcher_for_test(false, 1);
+        let _ = app.update(Message::KeyEvent(keyboard::Event::ModifiersChanged(Modifiers::empty())));
+        assert!(rx.try_recv().is_err());
+        let _ = app.update(Message::KeyEvent(keyboard::Event::ModifiersChanged(Modifiers::SHIFT)));
+        let _ = app.update(Message::Tick(app.last_activity + INACTIVITY_TIMEOUT + std::time::Duration::from_secs(1)));
+        assert!(rx.try_recv().is_err());
+        let _ = app.update(Message::KeyEvent(keyboard::Event::ModifiersChanged(Modifiers::empty())));
+        let _ = app.update(Message::Tick(app.last_activity + INACTIVITY_TIMEOUT));
+        assert!(matches!(rx.try_recv(), Ok(ActivateCommand::Activate(1))));
+    }
+
+    #[test]
+    fn shortcut_does_not_timeout_before_initial_modifier_state() {
+        let (mut app, rx) = switcher_for_test(true, 1);
+        let _ = app.update(Message::Tick(app.last_activity + INACTIVITY_TIMEOUT + std::time::Duration::from_secs(1)));
+        assert!(rx.try_recv().is_err());
+    }
 
     #[test]
     fn inactivity_timeout_triggers_activation() {
@@ -298,6 +402,9 @@ mod tests {
             cmd_tx,
             super_held: false,
             alt_held: false,
+            modifiers: keyboard::Modifiers::empty(),
+            initial_shortcut: false,
+            pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
             visuals: vec![],
@@ -327,6 +434,9 @@ mod tests {
             cmd_tx,
             super_held: false,
             alt_held: false,
+            modifiers: keyboard::Modifiers::empty(),
+            initial_shortcut: false,
+            pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
             visuals: vec![],
@@ -360,6 +470,9 @@ mod tests {
             cmd_tx,
             super_held: false,
             alt_held: false,
+            modifiers: keyboard::Modifiers::empty(),
+            initial_shortcut: false,
+            pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
             visuals: vec![],
@@ -407,6 +520,9 @@ mod tests {
             cmd_tx,
             super_held: false,
             alt_held: false,
+            modifiers: keyboard::Modifiers::empty(),
+            initial_shortcut: false,
+            pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
             visuals: vec![],
@@ -447,6 +563,9 @@ mod tests {
             cmd_tx,
             super_held: false,
             alt_held: false,
+            modifiers: keyboard::Modifiers::empty(),
+            initial_shortcut: false,
+            pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
             visuals: vec![],
@@ -471,6 +590,9 @@ mod tests {
             cmd_tx,
             super_held: false,
             alt_held: false,
+            modifiers: keyboard::Modifiers::empty(),
+            initial_shortcut: false,
+            pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
             visuals: vec![],
@@ -510,6 +632,9 @@ mod tests {
             cmd_tx,
             super_held: false,
             alt_held: false,
+            modifiers: keyboard::Modifiers::empty(),
+            initial_shortcut: false,
+            pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
             visuals: vec![],
@@ -548,6 +673,9 @@ mod tests {
             cmd_tx,
             super_held: false,
             alt_held: false,
+            modifiers: keyboard::Modifiers::empty(),
+            initial_shortcut: false,
+            pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
             visuals: vec![],

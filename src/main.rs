@@ -10,6 +10,7 @@ use std::os::unix::net::UnixStream;
 use cosmic::cosmic_config::ConfigGet;
 use switcher_config::{Theme, WorkspaceScope, APP_ID, CONFIG_VERSION};
 
+
 pub fn socket_path() -> std::path::PathBuf {
     let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
     std::path::PathBuf::from(dir).join("cosmic-ext-app-switcher.sock")
@@ -70,6 +71,9 @@ impl Drop for SocketCleaner {
 pub struct Args {
     #[arg(long, default_value_t = false)]
     pub reverse: bool,
+
+    #[arg(long, hide = true)]
+    pub shortcut: bool,
 
     /// Report whether the compositor offers the Wayland interfaces the switcher needs, then exit
     #[arg(long, default_value_t = false)]
@@ -162,7 +166,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let run_res = app::run(toplevels, args.reverse, cmd_tx, theme, listener);
+    let run_res = app::run(toplevels, args.reverse, args.shortcut, cmd_tx, theme, listener);
     let _ = join_handle.join();
     run_res
 }

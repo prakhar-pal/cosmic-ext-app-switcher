@@ -98,10 +98,10 @@ fn shortcut_is_configured() -> bool {
 
 fn switcher_exec() -> String {
     if std::env::var("FLATPAK_ID").is_ok() {
-        format!("flatpak run --command=cosmic-ext-app-switcher {APPLET_ID}")
+        format!("flatpak run --command=cosmic-ext-app-switcher {APPLET_ID} --shortcut")
     } else {
         let home = std::env::var("HOME").unwrap_or_default();
-        format!("{home}/.local/bin/cosmic-ext-app-switcher")
+        format!("{home}/.local/bin/cosmic-ext-app-switcher --shortcut")
     }
 }
 
@@ -171,7 +171,8 @@ fn do_register_shortcut() -> Result<(), String> {
 fn register_shortcut_in(path: &std::path::Path, cmd: &str) -> Result<(), String> {
     let existing = std::fs::read_to_string(path).ok();
     let expected_binding = format!("WindowSwitcher: \"{cmd}\"");
-    if existing.as_deref().is_some_and(|s| s.contains(&expected_binding)) {
+    let expected_reverse = format!("WindowSwitcherPrevious: \"{cmd} --reverse\"");
+    if existing.as_deref().is_some_and(|s| s.contains(&expected_binding) && s.contains(&expected_reverse)) {
         return Ok(());
     }
 
@@ -412,6 +413,20 @@ mod tests {
     use super::{rebuild_shortcut_map, register_shortcut_in, shortcuts_config_path_in};
 
     const CMD: &str = "/home/u/.local/bin/cosmic-ext-app-switcher";
+
+    #[test]
+    fn registration_repairs_stale_reverse_action() {
+        let dir = std::env::temp_dir().join(format!("switcher-repair-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("system_actions");
+        let cmd = format!("{CMD} --shortcut");
+        std::fs::write(&path, format!("{{\n Terminal: \"ghostty\",\n WindowSwitcher: \"{cmd}\",\n WindowSwitcherPrevious: \"{CMD} --reverse\",\n}}\n")).unwrap();
+        register_shortcut_in(&path, &cmd).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(&format!("WindowSwitcherPrevious: \"{cmd} --reverse\"")));
+        assert!(text.contains("Terminal: \"ghostty\""));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn old_path_is_updated_when_registering_new_path() {
