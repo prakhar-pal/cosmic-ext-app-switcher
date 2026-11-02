@@ -44,11 +44,17 @@ fn shortcuts_config_path() -> Option<std::path::PathBuf> {
             std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config")
         });
 
-    let shortcuts_dir = config_home
-        .join("cosmic")
-        .join("com.system76.CosmicSettings.Shortcuts");
+    shortcuts_config_path_in(&config_home)
+}
+
+fn shortcuts_config_path_in(config_home: &std::path::Path) -> Option<std::path::PathBuf> {
+    let cosmic_dir = config_home.join("cosmic");
+    let shortcuts_dir = cosmic_dir.join("com.system76.CosmicSettings.Shortcuts");
 
     if !shortcuts_dir.exists() {
+        if cosmic_dir.exists() {
+            return Some(shortcuts_dir.join("v1").join("system_actions"));
+        }
         return None;
     }
 
@@ -92,10 +98,10 @@ fn shortcut_is_configured() -> bool {
 
 fn switcher_exec() -> String {
     if std::env::var("FLATPAK_ID").is_ok() {
-        format!("flatpak run --command=cosmic-ext-app-switcher {APPLET_ID}")
+        format!("flatpak run --command=cosmic-ext-app-switcher {APPLET_ID} --shortcut")
     } else {
         let home = std::env::var("HOME").unwrap_or_default();
-        format!("{home}/.local/bin/cosmic-ext-app-switcher")
+        format!("{home}/.local/bin/cosmic-ext-app-switcher --shortcut")
     }
 }
 
@@ -159,16 +165,22 @@ fn do_register_shortcut() -> Result<(), String> {
     let path = shortcuts_config_path()
         .ok_or_else(|| "COSMIC shortcuts directory not found — is COSMIC installed?".to_string())?;
 
-    let existing = std::fs::read_to_string(&path).ok();
-    if existing.as_deref().is_some_and(|s| s.contains("cosmic-ext-app-switcher")) {
+    register_shortcut_in(&path, &switcher_exec())
+}
+
+fn register_shortcut_in(path: &std::path::Path, cmd: &str) -> Result<(), String> {
+    let existing = std::fs::read_to_string(path).ok();
+    let expected_binding = format!("WindowSwitcher: \"{cmd}\"");
+    let expected_reverse = format!("WindowSwitcherPrevious: \"{cmd} --reverse\"");
+    if existing.as_deref().is_some_and(|s| s.contains(&expected_binding) && s.contains(&expected_reverse)) {
         return Ok(());
     }
 
-    std::fs::create_dir_all(path.parent().unwrap())
-        .map_err(|e| e.to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
 
-    let cmd = switcher_exec();
-    write_shortcut_map(&path, rebuild_shortcut_map(existing.as_deref(), Some(&cmd)))
+    write_shortcut_map(path, rebuild_shortcut_map(existing.as_deref(), Some(cmd)))
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +260,7 @@ impl Application for AppletApp {
             }
             Message::SetScope(scope) => {
                 if let Some(handler) = &self.config_handler {
-                    let _ = handler.set("workspace_scope", &scope);
+                    let _ = handler.set("workspace_scope", scope);
                 }
                 self.current_scope = scope;
             }
@@ -270,7 +282,7 @@ impl Application for AppletApp {
         Task::none()
     }
 
-    fn view(&self) -> Element<Message> {
+    fn view(&self) -> Element<'_, Message> {
         let mut handle = cosmic::widget::icon::from_svg_bytes(
             include_bytes!("../data/io.github.cosmic-ext-applet-app-switcher-symbolic.svg")
                 as &'static [u8],
@@ -283,7 +295,7 @@ impl Application for AppletApp {
             .into()
     }
 
-    fn view_window(&self, _id: WindowId) -> Element<Message> {
+    fn view_window(&self, _id: WindowId) -> Element<'_, Message> {
         let swatches: Vec<Element<Message>> = Theme::all()
             .into_iter()
             .map(|t| {
@@ -300,12 +312,12 @@ impl Application for AppletApp {
                 )
                 .width(Length::Fixed(68.0))
                 .height(Length::Fixed(40.0))
-                .style(move |_: &cosmic::Theme| ContainerStyle {
+                .style(move |theme: &cosmic::Theme| ContainerStyle {
                     background: Some(Background::Color(preview_bg)),
                     border: Border {
                         radius: 6.0.into(),
                         width: if selected { 2.5 } else { 0.0 },
-                        color: Color::from_rgb(0.38, 0.58, 1.0),
+                        color: theme.cosmic().accent.base.into(),
                     },
                     ..Default::default()
                 });
@@ -331,12 +343,12 @@ impl Application for AppletApp {
 
                 let card = container(text(label).size(12))
                     .padding([6, 10])
-                    .style(move |_: &cosmic::Theme| ContainerStyle {
+                    .style(move |theme: &cosmic::Theme| ContainerStyle {
                         border: Border {
                             radius: 6.0.into(),
                             width: if selected { 2.0 } else { 1.0 },
                             color: if selected {
-                                Color::from_rgb(0.38, 0.58, 1.0)
+                                theme.cosmic().accent.base.into()
                             } else {
                                 Color::from_rgba(1.0, 1.0, 1.0, 0.15)
                             },
@@ -398,9 +410,59 @@ impl Application for AppletApp {
 
 #[cfg(test)]
 mod tests {
-    use super::rebuild_shortcut_map;
+    use super::{rebuild_shortcut_map, register_shortcut_in, shortcuts_config_path_in};
 
     const CMD: &str = "/home/u/.local/bin/cosmic-ext-app-switcher";
+
+    #[test]
+    fn registration_repairs_stale_reverse_action() {
+        let dir = std::env::temp_dir().join(format!("switcher-repair-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("system_actions");
+        let cmd = format!("{CMD} --shortcut");
+        std::fs::write(&path, format!("{{\n Terminal: \"ghostty\",\n WindowSwitcher: \"{cmd}\",\n WindowSwitcherPrevious: \"{CMD} --reverse\",\n}}\n")).unwrap();
+        register_shortcut_in(&path, &cmd).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(&format!("WindowSwitcherPrevious: \"{cmd} --reverse\"")));
+        assert!(text.contains("Terminal: \"ghostty\""));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn old_path_is_updated_when_registering_new_path() {
+        let temp = std::env::temp_dir().join(format!("cosmic-reg-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let config_file = temp.join("system_actions");
+
+        let old_content = "{\n    WindowSwitcher: \"/old/path/cosmic-ext-app-switcher\",\n    WindowSwitcherPrevious: \"/old/path/cosmic-ext-app-switcher --reverse\",\n}\n";
+        std::fs::write(&config_file, old_content).unwrap();
+
+        let new_cmd = "/new/path/cosmic-ext-app-switcher";
+        register_shortcut_in(&config_file, new_cmd).unwrap();
+
+        let updated = std::fs::read_to_string(&config_file).unwrap();
+        assert!(updated.contains(&format!("WindowSwitcher: \"{new_cmd}\"")), "should contain new path, got:\n{updated}");
+        assert!(!updated.contains("/old/path/cosmic-ext-app-switcher"), "should not contain old path");
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn fresh_cosmic_without_shortcuts_dir_returns_v1_path() {
+        let temp = std::env::temp_dir().join(format!("cosmic-test-{}", std::process::id()));
+        let cosmic_dir = temp.join("cosmic");
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&cosmic_dir).unwrap();
+
+        let path = shortcuts_config_path_in(&temp);
+        assert_eq!(
+            path,
+            Some(cosmic_dir.join("com.system76.CosmicSettings.Shortcuts").join("v1").join("system_actions"))
+        );
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
 
     fn assert_well_formed(s: &str) {
         assert!(s.starts_with("{\n"), "missing opening brace: {s:?}");

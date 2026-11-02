@@ -26,10 +26,12 @@ use switcher_config::WorkspaceScope;
 pub struct ToplevelEntry {
     pub app_id:     String,
     pub title:      String,
+    #[allow(dead_code)]
     pub is_active:  bool,
     pub handle_key: usize,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum ActivateCommand {
     Activate(usize),
     Cancel,
@@ -103,11 +105,11 @@ pub fn probe_required_globals() -> Result<Vec<GlobalStatus>> {
 
 pub fn spawn_wayland_thread(
     scope: WorkspaceScope,
-) -> Result<(Vec<ToplevelEntry>, mpsc::SyncSender<ActivateCommand>)> {
+) -> Result<(Vec<ToplevelEntry>, mpsc::SyncSender<ActivateCommand>, std::thread::JoinHandle<()>)> {
     let (list_tx, list_rx) = mpsc::sync_channel(1);
     let (cmd_tx, cmd_rx)   = mpsc::sync_channel(1);
 
-    std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         if let Err(e) = wayland_thread_main(scope, &list_tx, cmd_rx) {
             // Before the list is sent, main is still waiting in recv() and reports the
             // error itself. After that the receiver is gone, so all we can do is log.
@@ -118,7 +120,7 @@ pub fn spawn_wayland_thread(
     });
 
     let toplevels = list_rx.recv()??;
-    Ok((toplevels, cmd_tx))
+    Ok((toplevels, cmd_tx, handle))
 }
 
 struct AppData {
@@ -260,18 +262,16 @@ fn wayland_thread_main(
 
     list_tx.send(Ok(entries)).ok();
 
-    match cmd_rx.recv() {
-        Ok(ActivateCommand::Activate(key)) => {
-            if let (Some(toplevel), Some(mgr), Some(seat)) = (
-                data.toplevels.get(key),
-                &data.manager,
-                &data.seat,
-            ) {
-                mgr.activate(&toplevel.handle, seat);
-                conn.flush()?;
-            }
-        }
-        _ => {}
+    if let Ok(ActivateCommand::Activate(key)) = cmd_rx.recv()
+        && let (Some(toplevel), Some(mgr), Some(seat)) = (
+            data.toplevels.get(key),
+            &data.manager,
+            &data.seat,
+        )
+    {
+        mgr.activate(&toplevel.handle, seat);
+        let _ = queue.roundtrip(&mut data);
+        conn.flush()?;
     }
 
     Ok(())
@@ -358,6 +358,15 @@ impl Dispatch<ZcosmicToplevelInfoV1, ()> for AppData {
 
 // --- ZcosmicToplevelHandleV1: per-window metadata ---
 
+fn is_state_activated(state: &[u8]) -> bool {
+    let activated = zcosmic_toplevel_handle_v1::State::Activated as u32;
+    state
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|b| u32::from_ne_bytes(*b) == activated)
+}
+
 impl Dispatch<ZcosmicToplevelHandleV1, ()> for AppData {
     fn event(
         data: &mut Self,
@@ -378,10 +387,7 @@ impl Dispatch<ZcosmicToplevelHandleV1, ()> for AppData {
                 t.title = title;
             }
             zcosmic_toplevel_handle_v1::Event::State { state } => {
-                let activated = zcosmic_toplevel_handle_v1::State::Activated as u32;
-                t.is_active = state
-                    .chunks_exact(4)
-                    .any(|b| u32::from_ne_bytes(b.try_into().unwrap()) == activated);
+                t.is_active = is_state_activated(&state);
             }
             zcosmic_toplevel_handle_v1::Event::Closed => {
                 data.toplevels.retain(|t| &t.handle != handle);
@@ -516,5 +522,28 @@ mod tests {
     fn repeated_global_uses_highest_version() {
         let globals = [("wl_seat", 5), ("wl_seat", 8)];
         assert_eq!(line_for(&globals, "wl_seat"), "wl_seat: ok (v8, needs v7)");
+    }
+
+    #[test]
+    fn state_activation_parses_native_endian_chunks() {
+        use cosmic_protocols::toplevel_info::v1::client::zcosmic_toplevel_handle_v1;
+
+        let activated = zcosmic_toplevel_handle_v1::State::Activated as u32;
+        let maximized = zcosmic_toplevel_handle_v1::State::Maximized as u32;
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&maximized.to_ne_bytes());
+        assert!(!super::is_state_activated(&bytes));
+
+        bytes.extend_from_slice(&activated.to_ne_bytes());
+        assert!(super::is_state_activated(&bytes));
+
+        // trailing unaligned bytes are ignored safely without panics
+        bytes.push(0xFF);
+        bytes.push(0xFE);
+        assert!(super::is_state_activated(&bytes));
+
+        let empty = vec![];
+        assert!(!super::is_state_activated(&empty));
     }
 }

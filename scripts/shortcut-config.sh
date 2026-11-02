@@ -48,8 +48,8 @@ _write_map() {
 # shortcut_register <config> <binary>
 shortcut_register() {
     _write_map "$1" \
-        "    WindowSwitcher: \"$2\"," \
-        "    WindowSwitcherPrevious: \"$2 --reverse\","
+        "    WindowSwitcher: \"$2 --shortcut\"," \
+        "    WindowSwitcherPrevious: \"$2 --shortcut --reverse\","
 }
 
 # shortcut_unregister <config>

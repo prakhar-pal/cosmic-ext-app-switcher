@@ -165,7 +165,8 @@ else
         CONFIG="${VERSION_DIR:-$SHORTCUTS_DIR/v1}/system_actions"
     fi
 
-    if [ -f "$CONFIG" ] && grep -q "cosmic-ext-app-switcher" "$CONFIG"; then
+    if [ -f "$CONFIG" ] && grep -qF "WindowSwitcher: \"$INSTALL_DIR/$BINARY --shortcut\"" "$CONFIG" 2>/dev/null &&
+       grep -qF "WindowSwitcherPrevious: \"$INSTALL_DIR/$BINARY --shortcut --reverse\"" "$CONFIG" 2>/dev/null; then
         echo "Shortcut already registered."
     else
         # Rebuild the RON map rather than patching it: a file left without its braces
@@ -184,8 +185,8 @@ else
         {
             printf '{\n'
             if [ -n "$BODY" ]; then printf '%s\n' "$BODY"; fi
-            printf '    WindowSwitcher: "%s",\n' "$INSTALL_DIR/$BINARY"
-            printf '    WindowSwitcherPrevious: "%s --reverse",\n' "$INSTALL_DIR/$BINARY"
+            printf '    WindowSwitcher: "%s --shortcut",\n' "$INSTALL_DIR/$BINARY"
+            printf '    WindowSwitcherPrevious: "%s --shortcut --reverse",\n' "$INSTALL_DIR/$BINARY"
             printf '}\n'
         } > "$TMPCONF"
 

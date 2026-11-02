@@ -29,7 +29,8 @@ case "$rc" in
         ;;
 esac
 
-if grep -q "cosmic-ext-app-switcher" "$CONFIG"; then
+if grep -qF "WindowSwitcher: \"$BINARY --shortcut\"" "$CONFIG" 2>/dev/null &&
+   grep -qF "WindowSwitcherPrevious: \"$BINARY --shortcut --reverse\"" "$CONFIG" 2>/dev/null; then
     echo "Already enabled."
     exit 0
 fi

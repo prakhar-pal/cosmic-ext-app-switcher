@@ -26,6 +26,7 @@ install: build
 	install -Dm755 $(APPLET_BIN) $(INSTALL_DIR)/$(APPLET)
 	install -Dm644 $(DESKTOP) $(APPS_DIR)/io.github.cosmic-ext-applet-app-switcher.desktop
 	install -Dm644 $(ICON_SRC) $(ICONS_DIR)/io.github.cosmic-ext-applet-app-switcher-symbolic.svg
+	@gtk-update-icon-cache -f -t $(HOME)/.local/share/icons/hicolor/ 2>/dev/null || true
 	@$(MAKE) enable
 	@echo ""
 	@echo "Installed and enabled. Press Super+Tab or Alt+Tab to try it."
@@ -37,6 +38,7 @@ uninstall:
 	@rm -f $(INSTALL_DIR)/$(APPLET)
 	@rm -f $(APPS_DIR)/io.github.cosmic-ext-applet-app-switcher.desktop
 	@rm -f $(ICONS_DIR)/io.github.cosmic-ext-applet-app-switcher-symbolic.svg
+	@gtk-update-icon-cache -f -t $(HOME)/.local/share/icons/hicolor/ 2>/dev/null || true
 	@echo "Uninstalled. COSMIC default switcher restored."
 
 enable:

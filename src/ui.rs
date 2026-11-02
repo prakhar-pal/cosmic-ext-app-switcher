@@ -9,7 +9,7 @@ use cosmic::{
     Element,
 };
 use crate::app::{AppSwitcher, Message};
-use crate::icons::{AppIcon, visual_for};
+use crate::icons::AppIcon;
 use switcher_config::ThemeValues;
 
 const CELL_PAD:     u16 = 10;
@@ -21,6 +21,7 @@ const TITLE_HEIGHT: u16 = 20;
 const TITLE_GAP:    u16 = 6;
 /// Breathing room around the strip, so its shadow isn't clipped by the surface edge.
 const SURFACE_MARGIN: u32 = 40;
+pub const MAX_SURFACE_WIDTH: u32 = 1400;
 
 /// A layer surface has to name its pixel size up front and clips anything past it, so the
 /// strip's geometry is worked out here, once, for both the surface and the view.
@@ -31,7 +32,8 @@ pub fn surface_size(window_count: usize, theme: &ThemeValues) -> (u32, u32) {
         + 2 * u32::from(STRIP_PAD_X);
     let strip_h = cell + u32::from(TITLE_GAP) + u32::from(TITLE_HEIGHT)
         + 2 * u32::from(STRIP_PAD_Y);
-    (strip_w + SURFACE_MARGIN, strip_h + SURFACE_MARGIN)
+    let total_w = (strip_w + SURFACE_MARGIN).min(MAX_SURFACE_WIDTH);
+    (total_w, strip_h + SURFACE_MARGIN)
 }
 
 /// Shortens `title` to what fits inside a surface of `surface_w`, at TITLE_SIZE. Anything
@@ -49,7 +51,7 @@ fn fit_title(title: &str, surface_w: u32) -> String {
     format!("{}…", kept.trim_end())
 }
 
-pub fn view(state: &AppSwitcher) -> Element<Message> {
+pub fn view(state: &AppSwitcher) -> Element<'_, Message> {
     let tv = &state.theme;
     let bg       = Color::from_rgba(tv.bg[0],          tv.bg[1],          tv.bg[2],          tv.bg[3]);
     let sel_bg   = Color::from_rgba(tv.selected_bg[0], tv.selected_bg[1], tv.selected_bg[2], tv.selected_bg[3]);
@@ -61,20 +63,20 @@ pub fn view(state: &AppSwitcher) -> Element<Message> {
     let cells: Vec<Element<Message>> = state.toplevels
         .iter()
         .enumerate()
-        .map(|(i, entry)| {
+        .map(|(i, _entry)| {
             let selected = i == state.selected;
-            let visual = visual_for(&entry.app_id, &entry.title, icon_sz);
+            let visual = &state.visuals[i];
             if selected {
-                selected_label = visual.label;
+                selected_label = visual.label.clone();
             }
 
-            let app_icon: Element<Message> = match visual.icon {
+            let app_icon: Element<Message> = match &visual.icon {
                 AppIcon::Named(name) => icon::from_name(name.as_str())
                     .size(icon_sz)
                     .icon()
                     .size(icon_sz)
                     .into(),
-                AppIcon::File(path) => icon::icon(icon::from_path(path))
+                AppIcon::File(path) => icon::icon(icon::from_path(path.clone()))
                     .size(icon_sz)
                     .into(),
             };
@@ -143,8 +145,15 @@ pub fn view(state: &AppSwitcher) -> Element<Message> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_title, surface_size, TITLE_HEIGHT, TITLE_GAP};
+    use super::{fit_title, surface_size, TITLE_HEIGHT, TITLE_GAP, MAX_SURFACE_WIDTH};
     use switcher_config::Theme;
+
+    #[test]
+    fn surface_width_is_capped_at_max_surface_width() {
+        let theme = Theme::Dark.values();
+        let (w, _) = surface_size(50, &theme);
+        assert!(w <= MAX_SURFACE_WIDTH, "surface width {w} exceeded {MAX_SURFACE_WIDTH}");
+    }
 
     #[test]
     fn long_titles_are_shortened_to_the_strip() {
