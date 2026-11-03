@@ -2,6 +2,7 @@ mod app;
 mod icons;
 mod ui;
 mod wayland;
+mod prototype;
 
 use anyhow::Result;
 use clap::Parser;
@@ -75,6 +76,15 @@ pub struct Args {
     #[arg(long, hide = true)]
     pub shortcut: bool,
 
+    #[arg(long, hide = true, group = "prototype_mode")]
+    pub prototype_daemon: bool,
+    #[arg(long, hide = true, group = "prototype_mode")]
+    pub prototype_next: bool,
+    #[arg(long, hide = true, group = "prototype_mode")]
+    pub prototype_prev: bool,
+    #[arg(long, hide = true, group = "prototype_mode")]
+    pub prototype_stop: bool,
+
     /// Report whether the compositor offers the Wayland interfaces the switcher needs, then exit
     #[arg(long, default_value_t = false)]
     pub check_compat: bool,
@@ -111,6 +121,22 @@ fn check_compat() -> Result<()> {
 fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
+
+    if args.prototype_daemon {
+        return prototype::run_daemon();
+    }
+    let prototype_command = if args.prototype_next {
+        Some(prototype::Command::Next)
+    } else if args.prototype_prev {
+        Some(prototype::Command::Previous)
+    } else if args.prototype_stop {
+        Some(prototype::Command::Stop)
+    } else {
+        None
+    };
+    if let Some(command) = prototype_command {
+        return prototype::send(command);
+    }
 
     if args.check_compat {
         return check_compat();

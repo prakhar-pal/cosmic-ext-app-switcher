@@ -130,96 +130,7 @@ impl Application for AppSwitcher {
     }
 
     fn update(&mut self, msg: Message) -> Task<Message> {
-        let n = self.toplevels.len();
-        match msg {
-            Message::SelectNext => {
-                self.last_activity = std::time::Instant::now();
-                if self.pending_activation.is_some() { self.pending_activation = Some(self.last_activity + std::time::Duration::from_millis(100)); }
-                self.selected = (self.selected + 1) % n;
-            }
-            Message::SelectPrev => {
-                self.last_activity = std::time::Instant::now();
-                if self.pending_activation.is_some() { self.pending_activation = Some(self.last_activity + std::time::Duration::from_millis(100)); }
-                self.selected = (self.selected + n - 1) % n;
-            }
-            Message::SelectIndex(i) => {
-                self.last_activity = std::time::Instant::now();
-                self.selected = i;
-            }
-            Message::Tick(now) => {
-                if self.pending_activation.is_some_and(|deadline| now >= deadline) {
-                    self.pending_activation = None;
-                    return self.update(Message::Activate);
-                }
-                if !self.initial_shortcut && self.modifiers.is_empty() && now.duration_since(self.last_activity) >= INACTIVITY_TIMEOUT {
-                    log::info!("Inactivity timeout expired; activating selected window");
-                    return self.update(Message::Activate);
-                }
-            }
-            Message::Activate => {
-                self.cmd_tx
-                    .send(ActivateCommand::Activate(self.toplevels[self.selected].handle_key))
-                    .ok();
-                return Task::batch([
-                    destroy_layer_surface(self.surface_id),
-                    iced::exit(),
-                ]);
-            }
-            Message::Cancel => {
-                self.cmd_tx.send(ActivateCommand::Cancel).ok();
-                return Task::batch([
-                    destroy_layer_surface(self.surface_id),
-                    iced::exit(),
-                ]);
-            }
-            Message::KeyEvent(ke) => {
-                self.last_activity = std::time::Instant::now();
-                match ke {
-                keyboard::Event::KeyPressed { key, modifiers, .. } => {
-                    self.modifiers = modifiers;
-                    if modifiers.logo() {
-                        self.super_held = true;
-                    }
-                    if modifiers.alt() {
-                        self.alt_held = true;
-                    }
-                    match key {
-                        iced::keyboard::Key::Named(Named::Tab) => {
-                            return self.update(if modifiers.shift() {
-                                Message::SelectPrev
-                            } else {
-                                Message::SelectNext
-                            });
-                        }
-                        iced::keyboard::Key::Named(Named::Escape) => {
-                            return self.update(Message::Cancel);
-                        }
-                        iced::keyboard::Key::Named(Named::Enter) => {
-                            return self.update(Message::Activate);
-                        }
-                        _ => {}
-                    }
-                }
-                keyboard::Event::ModifiersChanged(mods) => {
-                    self.modifiers = mods;
-                    if mods.alt() || mods.logo() { self.pending_activation = None; }
-                    let first = std::mem::take(&mut self.initial_shortcut);
-                    if first && !mods.alt() && !mods.logo() {
-                        self.pending_activation = Some(std::time::Instant::now() + std::time::Duration::from_millis(100));
-                    }
-                    let activate = (self.super_held && !mods.logo())
-                        || (self.alt_held && !mods.alt());
-                    self.super_held = mods.logo();
-                    self.alt_held = mods.alt();
-                    if activate {
-                        return self.update(Message::Activate);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    Task::none()
+        self.update_session(msg, false)
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -285,6 +196,106 @@ impl Application for AppSwitcher {
     }
 }
 
+impl AppSwitcher {
+    pub(crate) fn update_session(&mut self, msg: Message, persistent: bool) -> Task<Message> {
+        let n = self.toplevels.len();
+        match msg {
+            Message::SelectNext => {
+                self.last_activity = std::time::Instant::now();
+                if self.pending_activation.is_some() { self.pending_activation = Some(self.last_activity + std::time::Duration::from_millis(100)); }
+                self.selected = (self.selected + 1) % n;
+            }
+            Message::SelectPrev => {
+                self.last_activity = std::time::Instant::now();
+                if self.pending_activation.is_some() { self.pending_activation = Some(self.last_activity + std::time::Duration::from_millis(100)); }
+                self.selected = (self.selected + n - 1) % n;
+            }
+            Message::SelectIndex(i) => {
+                self.last_activity = std::time::Instant::now();
+                self.selected = i;
+            }
+            Message::Tick(now) => {
+                if self.pending_activation.is_some_and(|deadline| now >= deadline) {
+                    self.pending_activation = None;
+                    return self.update_session(Message::Activate, persistent);
+                }
+                if !self.initial_shortcut && self.modifiers.is_empty() && now.duration_since(self.last_activity) >= INACTIVITY_TIMEOUT {
+                    log::info!("Inactivity timeout expired; activating selected window");
+                    return self.update_session(Message::Activate, persistent);
+                }
+            }
+            Message::Activate => {
+                self.cmd_tx
+                    .send(ActivateCommand::Activate(self.toplevels[self.selected].handle_key))
+                    .ok();
+                if persistent { self.toplevels.clear(); }
+                return Task::batch([
+                    destroy_layer_surface(self.surface_id),
+                    if persistent { Task::none() } else { iced::exit() },
+                ]);
+            }
+            Message::Cancel => {
+                self.cmd_tx.send(ActivateCommand::Cancel).ok();
+                if persistent { self.toplevels.clear(); }
+                return Task::batch([
+                    destroy_layer_surface(self.surface_id),
+                    if persistent { Task::none() } else { iced::exit() },
+                ]);
+            }
+            Message::KeyEvent(ke) => {
+                self.last_activity = std::time::Instant::now();
+                match ke {
+                keyboard::Event::KeyPressed { key, modifiers, .. } => {
+                    self.modifiers = modifiers;
+                    if modifiers.logo() {
+                        self.super_held = true;
+                    }
+                    if modifiers.alt() {
+                        self.alt_held = true;
+                    }
+                    match key {
+                        iced::keyboard::Key::Named(Named::Tab) => {
+                            return self.update_session(if modifiers.shift() {
+                                Message::SelectPrev
+                            } else {
+                                Message::SelectNext
+                            }, persistent);
+                        }
+                        iced::keyboard::Key::Named(Named::Escape) => {
+                            return self.update_session(Message::Cancel, persistent);
+                        }
+                        iced::keyboard::Key::Named(Named::Enter) => {
+                            return self.update_session(Message::Activate, persistent);
+                        }
+                        _ => {}
+                    }
+                }
+                keyboard::Event::ModifiersChanged(mods) => {
+                    self.modifiers = mods;
+                    if mods.alt() || mods.logo() { self.pending_activation = None; }
+                    let first = std::mem::take(&mut self.initial_shortcut);
+                    if first && !mods.alt() && !mods.logo() {
+                        self.pending_activation = Some(std::time::Instant::now() + std::time::Duration::from_millis(100));
+                    }
+                    let activate = (self.super_held && !mods.logo())
+                        || (self.alt_held && !mods.alt());
+                    self.super_held = mods.logo();
+                    self.alt_held = mods.alt();
+                    if activate {
+                        return self.update_session(Message::Activate, persistent);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Task::none()
+    }
+
+
+    pub(crate) fn surface_id(&self) -> WindowId { self.surface_id }
+}
+
 pub fn run(
     toplevels: Vec<ToplevelEntry>,
     reverse: bool,
@@ -316,6 +327,31 @@ mod tests {
             listener: SharedListener(std::sync::Arc::new(std::sync::Mutex::new(None))),
             last_activity: std::time::Instant::now(),
         }, cmd_rx)
+    }
+
+    #[test]
+    fn persistent_sessions_reset_modifiers_and_settling_on_every_open() {
+        for _ in 0..2 {
+            let (mut app, rx) = switcher_for_test(true, 1);
+            assert!(!app.alt_held && !app.super_held);
+            assert!(app.modifiers.is_empty() && app.pending_activation.is_none());
+            let _ = app.update_session(Message::KeyEvent(keyboard::Event::ModifiersChanged(Modifiers::empty())), true);
+            let deadline = app.pending_activation.unwrap();
+            let _ = app.update_session(Message::Tick(deadline - std::time::Duration::from_millis(1)), true);
+            assert!(rx.try_recv().is_err());
+            let _ = app.update_session(Message::Tick(deadline), true);
+            assert!(matches!(rx.try_recv(), Ok(ActivateCommand::Activate(1))));
+            assert!(rx.try_recv().is_err());
+            assert!(app.toplevels.is_empty());
+        }
+    }
+
+    #[test]
+    fn persistent_cancel_closes_session() {
+        let (mut app, rx) = switcher_for_test(true, 1);
+        let _ = app.update_session(Message::Cancel, true);
+        assert!(matches!(rx.try_recv(), Ok(ActivateCommand::Cancel)));
+        assert!(app.toplevels.is_empty());
     }
 
     #[test]
