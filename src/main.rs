@@ -85,24 +85,38 @@ pub struct Args {
     #[arg(long, hide = true, group = "prototype_mode")]
     pub prototype_stop: bool,
 
+    /// Which windows to list, overriding the configured scope for this invocation
+    #[arg(long, value_enum)]
+    pub scope: Option<ScopeArg>,
+
     /// Report whether the compositor offers the Wayland interfaces the switcher needs, then exit
     #[arg(long, default_value_t = false)]
     pub check_compat: bool,
 }
 
-fn load_theme() -> Theme {
-    use cosmic::cosmic_config::Config;
-    Config::new(APP_ID, CONFIG_VERSION)
-        .ok()
-        .and_then(|c| c.get::<Theme>("theme").ok())
-        .unwrap_or_default()
+/// The scopes offered on the command line, named for what users see.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ScopeArg {
+    /// Every window, on every workspace and monitor
+    All,
+    /// Only windows on the monitor holding the window you're switching away from
+    CurrentMonitor,
 }
 
-fn load_scope() -> WorkspaceScope {
+impl From<ScopeArg> for WorkspaceScope {
+    fn from(arg: ScopeArg) -> Self {
+        match arg {
+            ScopeArg::All            => WorkspaceScope::AllWorkspaces,
+            ScopeArg::CurrentMonitor => WorkspaceScope::CurrentOutput,
+        }
+    }
+}
+
+fn load<T: switcher_config::DeserializeOwned + Default>(key: &str) -> T {
     use cosmic::cosmic_config::Config;
     Config::new(APP_ID, CONFIG_VERSION)
         .ok()
-        .and_then(|c| c.get::<WorkspaceScope>("workspace_scope").ok())
+        .and_then(|c| c.get::<T>(key).ok())
         .unwrap_or_default()
 }
 
@@ -183,8 +197,10 @@ fn main() -> Result<()> {
         }
     };
 
-    let theme = load_theme();
-    let scope = load_scope();
+    let theme = load::<Theme>("theme");
+    // A --scope on the command line beats the applet's setting, so one binding can list
+    // every window while another lists only this monitor's (#7).
+    let scope = args.scope.map_or_else(|| load("workspace_scope"), WorkspaceScope::from);
     let (toplevels, cmd_tx, join_handle) = wayland::spawn_wayland_thread(scope)?;
     if toplevels.is_empty() {
         drop(cmd_tx);
@@ -192,7 +208,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let run_res = app::run(toplevels, args.reverse, args.shortcut, cmd_tx, theme, listener);
+    let run_res = app::run(toplevels, args.reverse, args.shortcut, cmd_tx, theme, listener, load::<bool>("hide_title"));
     let _ = join_handle.join();
     run_res
 }
@@ -225,5 +241,28 @@ mod tests {
         }
 
         assert!(!temp.exists(), "SocketCleaner should remove file on drop");
+    }
+
+    #[test]
+    fn scope_is_optional_so_the_applet_setting_still_applies() {
+        assert_eq!(Args::parse_from(["switcher"]).scope, None);
+    }
+
+    #[test]
+    fn scope_values_map_to_the_config_scopes() {
+        let parsed = Args::parse_from(["switcher", "--scope", "current-monitor"]);
+        assert_eq!(parsed.scope, Some(ScopeArg::CurrentMonitor));
+        assert_eq!(WorkspaceScope::from(parsed.scope.unwrap()), WorkspaceScope::CurrentOutput);
+
+        let parsed = Args::parse_from(["switcher", "--scope", "all", "--reverse"]);
+        assert_eq!(WorkspaceScope::from(parsed.scope.unwrap()), WorkspaceScope::AllWorkspaces);
+        assert!(parsed.reverse);
+    }
+
+    #[test]
+    fn unknown_scopes_are_rejected() {
+        // Including the one the picker hides, so it can't look like a working option.
+        assert!(Args::try_parse_from(["switcher", "--scope", "current-workspace"]).is_err());
+        assert!(Args::try_parse_from(["switcher", "--scope", "nonsense"]).is_err());
     }
 }

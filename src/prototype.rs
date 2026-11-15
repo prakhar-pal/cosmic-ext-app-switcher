@@ -208,6 +208,7 @@ mod tests {
             daemon: &mut Daemon,
             count: usize,
             base: usize,
+            hide_title: bool,
         ) -> mpsc::Receiver<Vec<ActivateCommand>> {
             let (sender, receiver) = mpsc::sync_channel(1);
             let (done, result) = mpsc::channel();
@@ -219,7 +220,6 @@ mod tests {
                 .map(|i| ToplevelEntry {
                     app_id: "test".into(),
                     title: "Fixture".into(),
-                    is_active: i == 0,
                     handle_key: base + i,
                 })
                 .collect();
@@ -228,6 +228,7 @@ mod tests {
             tx.send(Ok((
                 (windows, sender, worker),
                 switcher_config::Theme::Dark,
+                hide_title,
             )))
             .unwrap();
             let _ = daemon.update(DaemonMessage::Tick(std::time::Instant::now()));
@@ -248,10 +249,11 @@ mod tests {
             command: Command::Next,
             sample: None,
         });
-        let done = snapshot(&mut daemon, 3, 10);
+        let done = snapshot(&mut daemon, 3, 10, false);
         let generation = daemon.lifecycle.generation;
         let first_surface = daemon.overlay.as_ref().unwrap().surface_id();
         assert_eq!(daemon.overlay.as_ref().unwrap().selected, 1);
+        assert!(!daemon.overlay.as_ref().unwrap().hide_title);
         send_to(&paths_in(&runtime.0).0, Command::Next).unwrap();
         let _ = daemon.update(DaemonMessage::Tick(std::time::Instant::now()));
         assert_eq!(daemon.overlay.as_ref().unwrap().selected, 2);
@@ -272,10 +274,11 @@ mod tests {
             command: Command::Previous,
             sample: None,
         }));
-        let done = snapshot(&mut daemon, 2, 20);
+        let done = snapshot(&mut daemon, 2, 20, true);
         let overlay = daemon.overlay.as_ref().unwrap();
         assert_eq!(overlay.selected, 1);
         assert_eq!(overlay.toplevels.len(), 2);
+        assert!(overlay.hide_title);
         assert_ne!(overlay.surface_id(), first_surface);
         let _ = daemon.overlay_message(generation, OverlayMessage::Cancel);
         assert!(
@@ -783,7 +786,7 @@ struct Daemon {
     overlay: Option<AppSwitcher>,
     closing_surface: Option<(u64, Id)>,
     worker: Option<std::thread::JoinHandle<()>>,
-    opening: Option<std::sync::mpsc::Receiver<Result<(Worker, switcher_config::Theme)>>>,
+    opening: Option<std::sync::mpsc::Receiver<Result<(Worker, switcher_config::Theme, bool)>>>,
 }
 #[derive(Debug, Clone)]
 enum DaemonMessage {
@@ -838,12 +841,13 @@ impl Daemon {
         self.opening = Some(rx);
         std::thread::spawn(move || {
             let result = (|| {
-                let theme = crate::load_theme();
-                let worker = crate::wayland::spawn_wayland_thread(crate::load_scope())?;
-                Ok((worker, theme))
+                let theme = crate::load::<switcher_config::Theme>("theme");
+                let hide_title = crate::load::<bool>("hide_title");
+                let worker = crate::wayland::spawn_wayland_thread(crate::load("workspace_scope"))?;
+                Ok((worker, theme, hide_title))
             })();
             if let Err(error) = tx.send(result) {
-                if let Ok(((windows, sender, worker), _)) = error.0 {
+                if let Ok(((windows, sender, worker), _, _)) = error.0 {
                     drop(windows);
                     drop(sender);
                     let _ = worker.join();
@@ -992,7 +996,7 @@ impl Application for Daemon {
                 if let Some(result) = ready {
                     self.opening = None;
                     match result {
-                        Ok(((windows, sender, worker), theme)) => {
+                        Ok(((windows, sender, worker), theme, hide_title)) => {
                             log::info!(
                                 "prototype snapshot daemon_pid={} windows={}",
                                 std::process::id(),
@@ -1004,7 +1008,7 @@ impl Application for Daemon {
                             {
                                 let (mut overlay, task) = AppSwitcher::init(
                                     Core::default(),
-                                    (windows, false, true, sender, theme, None),
+                                    (windows, false, true, sender, theme, None, hide_title),
                                 );
                                 overlay.selected = selected;
                                 log::info!(

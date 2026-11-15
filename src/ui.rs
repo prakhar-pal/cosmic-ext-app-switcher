@@ -10,7 +10,8 @@ use cosmic::{
 };
 use crate::app::{AppSwitcher, Message};
 use crate::icons::AppIcon;
-use switcher_config::ThemeValues;
+
+pub(crate) const ICON_SIZE: u16 = 60;
 
 const CELL_PAD:     u16 = 10;
 const CELL_SPACING: u16 = 4;
@@ -25,13 +26,13 @@ pub const MAX_SURFACE_WIDTH: u32 = 1400;
 
 /// A layer surface has to name its pixel size up front and clips anything past it, so the
 /// strip's geometry is worked out here, once, for both the surface and the view.
-pub fn surface_size(window_count: usize, theme: &ThemeValues) -> (u32, u32) {
+pub fn surface_size(window_count: usize, hide_title: bool) -> (u32, u32) {
     let n = window_count as u32;
-    let cell = u32::from(theme.icon_size) + 2 * u32::from(CELL_PAD);
+    let cell = u32::from(ICON_SIZE) + 2 * u32::from(CELL_PAD);
     let strip_w = n * cell + n.saturating_sub(1) * u32::from(CELL_SPACING)
         + 2 * u32::from(STRIP_PAD_X);
-    let strip_h = cell + u32::from(TITLE_GAP) + u32::from(TITLE_HEIGHT)
-        + 2 * u32::from(STRIP_PAD_Y);
+    let title_h = if hide_title { 0 } else { u32::from(TITLE_GAP) + u32::from(TITLE_HEIGHT) };
+    let strip_h = cell + title_h + 2 * u32::from(STRIP_PAD_Y);
     let total_w = (strip_w + SURFACE_MARGIN).min(MAX_SURFACE_WIDTH);
     (total_w, strip_h + SURFACE_MARGIN)
 }
@@ -56,7 +57,7 @@ pub fn view(state: &AppSwitcher) -> Element<'_, Message> {
     let bg       = Color::from_rgba(tv.bg[0],          tv.bg[1],          tv.bg[2],          tv.bg[3]);
     let sel_bg   = Color::from_rgba(tv.selected_bg[0], tv.selected_bg[1], tv.selected_bg[2], tv.selected_bg[3]);
     let corner   = tv.corner_radius;
-    let icon_sz  = tv.icon_size;
+    let icon_sz  = ICON_SIZE;
 
     let mut selected_label = String::new();
 
@@ -106,21 +107,20 @@ pub fn view(state: &AppSwitcher) -> Element<'_, Message> {
         })
         .collect();
 
-    let (surface_w, _) = surface_size(state.toplevels.len(), tv);
+    let (surface_w, _) = surface_size(state.toplevels.len(), state.hide_title);
     let fg = Color::from_rgba(tv.fg[0], tv.fg[1], tv.fg[2], tv.fg[3]);
     let title = text(fit_title(&selected_label, surface_w))
         .size(TITLE_SIZE)
         .height(TITLE_HEIGHT)
         .class(cosmic::theme::Text::Color(fg));
 
-    let strip = container(
-        column![
-            row(cells).spacing(CELL_SPACING).align_y(Alignment::Center),
-            title,
-        ]
+    let mut content = column![row(cells).spacing(CELL_SPACING).align_y(Alignment::Center)]
         .spacing(TITLE_GAP)
-        .align_x(Alignment::Center)
-    )
+        .align_x(Alignment::Center);
+    if !state.hide_title {
+        content = content.push(title);
+    }
+    let strip = container(content)
     .style(move |_: &cosmic::Theme| ContainerStyle {
         background: Some(Background::Color(bg)),
         border: Border {
@@ -145,19 +145,17 @@ pub fn view(state: &AppSwitcher) -> Element<'_, Message> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_title, surface_size, TITLE_HEIGHT, TITLE_GAP, MAX_SURFACE_WIDTH};
-    use switcher_config::Theme;
+    use super::{fit_title, surface_size, ICON_SIZE, TITLE_HEIGHT, TITLE_GAP, MAX_SURFACE_WIDTH};
 
     #[test]
     fn surface_width_is_capped_at_max_surface_width() {
-        let theme = Theme::Dark.values();
-        let (w, _) = surface_size(50, &theme);
+        let (w, _) = surface_size(50, false);
         assert!(w <= MAX_SURFACE_WIDTH, "surface width {w} exceeded {MAX_SURFACE_WIDTH}");
     }
 
     #[test]
     fn long_titles_are_shortened_to_the_strip() {
-        let (surface_w, _) = surface_size(3, &Theme::Dark.values());
+        let (surface_w, _) = surface_size(3, false);
         let long = "A window title far too long to fit under three icons at all";
         let fitted = fit_title(long, surface_w);
         assert!(fitted.ends_with('…'), "{fitted:?}");
@@ -168,18 +166,18 @@ mod tests {
     /// The surface has to be tall enough for the title, or the layer surface clips it.
     #[test]
     fn surface_leaves_room_for_the_title_row() {
-        let theme = Theme::Dark.values();
-        let (_, with_title) = surface_size(3, &theme);
-        let icons_only = u32::from(theme.icon_size) + 20 + 28 + 40;
+        let (_, with_title) = surface_size(3, false);
+        let (_, without) = surface_size(3, true);
+        assert_eq!(with_title - without, u32::from(TITLE_HEIGHT) + u32::from(TITLE_GAP));
+        let icons_only = u32::from(ICON_SIZE) + 20 + 28 + 40;
         assert_eq!(with_title, icons_only + u32::from(TITLE_HEIGHT) + u32::from(TITLE_GAP));
     }
 
     /// Width still tracks the window count, as the strip grows sideways.
     #[test]
     fn width_grows_with_each_window() {
-        let theme = Theme::Dark.values();
-        let (one, _) = surface_size(1, &theme);
-        let (two, _) = surface_size(2, &theme);
-        assert_eq!(two - one, u32::from(theme.icon_size) + 20 + 4);
+        let (one, _) = surface_size(1, false);
+        let (two, _) = surface_size(2, false);
+        assert_eq!(two - one, u32::from(ICON_SIZE) + 20 + 4);
     }
 }

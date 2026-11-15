@@ -49,6 +49,7 @@ pub struct AppSwitcher {
     pending_activation: Option<std::time::Instant>,
     surface_id:        WindowId,
     pub theme:         ThemeValues,
+    pub hide_title:    bool,
     pub visuals:       Vec<crate::icons::AppVisual>,
     listener:          SharedListener,
     pub last_activity: std::time::Instant,
@@ -74,6 +75,7 @@ impl Application for AppSwitcher {
         mpsc::SyncSender<ActivateCommand>,
         Theme,
         Option<std::os::unix::net::UnixListener>,
+        bool,
     );
     type Message  = Message;
 
@@ -83,7 +85,7 @@ impl Application for AppSwitcher {
     fn core_mut(&mut self) -> &mut Core { &mut self.core }
 
     fn init(core: Core, flags: Self::Flags) -> (Self, Task<Message>) {
-        let (toplevels, reverse, shortcut, cmd_tx, theme_preset, listener_opt) = flags;
+        let (toplevels, reverse, shortcut, cmd_tx, theme_preset, listener_opt, hide_title) = flags;
         let n = toplevels.len();
         let selected = if reverse {
             n.saturating_sub(1)
@@ -92,10 +94,10 @@ impl Application for AppSwitcher {
         };
 
         let theme = theme_preset.values();
-        let (surface_w, surface_h) = crate::ui::surface_size(toplevels.len(), &theme);
+        let (surface_w, surface_h) = crate::ui::surface_size(toplevels.len(), hide_title);
         let visuals: Vec<crate::icons::AppVisual> = toplevels
             .iter()
-            .map(|t| crate::icons::visual_for(&t.app_id, &t.title, theme.icon_size))
+            .map(|t| crate::icons::visual_for(&t.app_id, &t.title, crate::ui::ICON_SIZE))
             .collect();
 
         let surface_id = WindowId::unique();
@@ -121,6 +123,7 @@ impl Application for AppSwitcher {
                 pending_activation: None,
                 surface_id,
                 theme,
+                hide_title,
                 visuals,
                 listener: SharedListener(std::sync::Arc::new(std::sync::Mutex::new(listener_opt))),
                 last_activity: std::time::Instant::now(),
@@ -303,9 +306,10 @@ pub fn run(
     cmd_tx: mpsc::SyncSender<ActivateCommand>,
     theme: Theme,
     listener: Option<std::os::unix::net::UnixListener>,
+    hide_title: bool,
 ) -> Result<()> {
     let settings = Settings::default().no_main_window(true);
-    cosmic::app::run::<AppSwitcher>(settings, (toplevels, reverse, shortcut, cmd_tx, theme, listener))
+    cosmic::app::run::<AppSwitcher>(settings, (toplevels, reverse, shortcut, cmd_tx, theme, listener, hide_title))
         .map_err(|e| anyhow::anyhow!("{e:?}"))
 }
 
@@ -317,13 +321,13 @@ mod tests {
     fn switcher_for_test(shortcut: bool, selected: usize) -> (AppSwitcher, mpsc::Receiver<ActivateCommand>) {
         let (cmd_tx, cmd_rx) = mpsc::sync_channel(4);
         let toplevels = (0..3).map(|i| ToplevelEntry {
-            app_id: i.to_string(), title: i.to_string(), is_active: i == 0, handle_key: i,
+            app_id: i.to_string(), title: i.to_string(), handle_key: i,
         }).collect();
         (AppSwitcher {
             core: Core::default(), toplevels, selected, cmd_tx,
             super_held: false, alt_held: false, modifiers: Modifiers::empty(),
             initial_shortcut: shortcut, pending_activation: None, surface_id: WindowId::unique(),
-            theme: Theme::Dark.values(), visuals: vec![],
+            theme: Theme::Dark.values(), hide_title: false, visuals: vec![],
             listener: SharedListener(std::sync::Arc::new(std::sync::Mutex::new(None))),
             last_activity: std::time::Instant::now(),
         }, cmd_rx)
@@ -428,7 +432,6 @@ mod tests {
         let toplevels = vec![ToplevelEntry {
             app_id: "test".into(),
             title: "Test App".into(),
-            is_active: false,
             handle_key: 7,
         }];
         let mut app = AppSwitcher {
@@ -443,6 +446,7 @@ mod tests {
             pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
+            hide_title: false,
             visuals: vec![],
             listener: SharedListener(std::sync::Arc::new(std::sync::Mutex::new(None))),
             last_activity: std::time::Instant::now() - INACTIVITY_TIMEOUT - std::time::Duration::from_secs(1),
@@ -460,8 +464,8 @@ mod tests {
     fn user_activity_resets_inactivity_timeout() {
         let (cmd_tx, cmd_rx) = mpsc::sync_channel(1);
         let toplevels = vec![
-            ToplevelEntry { app_id: "a".into(), title: "A".into(), is_active: false, handle_key: 1 },
-            ToplevelEntry { app_id: "b".into(), title: "B".into(), is_active: false, handle_key: 2 },
+            ToplevelEntry { app_id: "a".into(), title: "A".into(), handle_key: 1 },
+            ToplevelEntry { app_id: "b".into(), title: "B".into(), handle_key: 2 },
         ];
         let mut app = AppSwitcher {
             core: Core::default(),
@@ -475,6 +479,7 @@ mod tests {
             pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
+            hide_title: false,
             visuals: vec![],
             listener: SharedListener(std::sync::Arc::new(std::sync::Mutex::new(None))),
             last_activity: std::time::Instant::now() - INACTIVITY_TIMEOUT,
@@ -496,7 +501,6 @@ mod tests {
         let toplevels = vec![ToplevelEntry {
             app_id: "test".into(),
             title: "Test App".into(),
-            is_active: false,
             handle_key: 42,
         }];
         let mut app = AppSwitcher {
@@ -511,6 +515,7 @@ mod tests {
             pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
+            hide_title: false,
             visuals: vec![],
             listener: SharedListener(std::sync::Arc::new(std::sync::Mutex::new(None))),
             last_activity: std::time::Instant::now(),
@@ -546,7 +551,6 @@ mod tests {
         let toplevels = vec![ToplevelEntry {
             app_id: "test".into(),
             title: "Test App".into(),
-            is_active: false,
             handle_key: 10,
         }];
         let mut app = AppSwitcher {
@@ -561,6 +565,7 @@ mod tests {
             pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
+            hide_title: false,
             visuals: vec![],
             listener: SharedListener(std::sync::Arc::new(std::sync::Mutex::new(None))),
             last_activity: std::time::Instant::now(),
@@ -604,6 +609,7 @@ mod tests {
             pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
+            hide_title: false,
             visuals: vec![],
             listener: SharedListener(std::sync::Arc::new(std::sync::Mutex::new(None))),
             last_activity: std::time::Instant::now(),
@@ -631,6 +637,7 @@ mod tests {
             pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
+            hide_title: false,
             visuals: vec![],
             listener: SharedListener(std::sync::Arc::new(std::sync::Mutex::new(None))),
             last_activity: std::time::Instant::now(),
@@ -658,7 +665,6 @@ mod tests {
         let toplevels = vec![ToplevelEntry {
             app_id: "test".into(),
             title: "Test App".into(),
-            is_active: false,
             handle_key: 7,
         }];
         let mut app = AppSwitcher {
@@ -673,6 +679,7 @@ mod tests {
             pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
+            hide_title: false,
             visuals: vec![],
             listener: SharedListener(std::sync::Arc::new(std::sync::Mutex::new(None))),
             last_activity: std::time::Instant::now(),
@@ -698,9 +705,9 @@ mod tests {
     fn shift_tab_cycles_backwards() {
         let (cmd_tx, _cmd_rx) = mpsc::sync_channel(1);
         let toplevels = vec![
-            ToplevelEntry { app_id: "a".into(), title: "A".into(), is_active: false, handle_key: 1 },
-            ToplevelEntry { app_id: "b".into(), title: "B".into(), is_active: false, handle_key: 2 },
-            ToplevelEntry { app_id: "c".into(), title: "C".into(), is_active: false, handle_key: 3 },
+            ToplevelEntry { app_id: "a".into(), title: "A".into(), handle_key: 1 },
+            ToplevelEntry { app_id: "b".into(), title: "B".into(), handle_key: 2 },
+            ToplevelEntry { app_id: "c".into(), title: "C".into(), handle_key: 3 },
         ];
         let mut app = AppSwitcher {
             core: Core::default(),
@@ -714,6 +721,7 @@ mod tests {
             pending_activation: None,
             surface_id: WindowId::unique(),
             theme: Theme::Dark.values(),
+            hide_title: false,
             visuals: vec![],
             listener: SharedListener(std::sync::Arc::new(std::sync::Mutex::new(None))),
             last_activity: std::time::Instant::now(),
